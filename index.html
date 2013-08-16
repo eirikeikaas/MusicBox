@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width; initial-scale=1.0; maximum-scale=1.0;">
+		<title>Ekeparty</title>
+		<script src="mopidy/mopidy.min.js"></script>
+		<script src="js/jquery-1.8.3.min.js"></script>
+		<script src="js/jquery.scrollTo.min.js"></script>
+		<script src="js/jquery.cookie.js"></script>
+		<script src="js/jquery.crypt.js"></script>
+		<script src="js/socket.io.min.js"></script>
+		<script src="js/foggy.min.js"></script>
+		<script src="//use.typekit.net/mpp8kel.js"></script>
+		<script>try{Typekit.load();}catch(e){}</script>
+		<link href="//get.pictos.cc/fonts/133/1" rel="stylesheet" type="text/css">
+		<link href="//get.pictos.cc/fonts/133/2" rel="stylesheet" type="text/css">
+		<script>
+			var mopidy;
+			var posval;
+			var pospos;
+			var trk;
+			var socket;
+			var authed;
+			var authdata;
+			var syscmd = {
+					console: {callback: function(args){
+						$('#console').toggle();
+					}},
+					auth: {callback: function(args){
+						serverlog('log', 'Setting authdata for user', 'systemio');
+						console.log(args);
+						if(args[0] == 'logout'){
+							$.cookie('authId', '');
+							$.cookie('authKey', '');
+						}else{
+							$.cookie('authId', args[0]);
+							$.cookie('authKey', $().crypt({method: 'sha1', source: args[1]}));
+						}
+						
+						setTimeout(function(){location.reload()}, 500);
+					}},
+					queue: {callback: function(args){
+						switch(args[0]){
+							case "clear":
+								authcomm("system:clear");
+								break;
+						}
+					}},
+					mem: {callback: function(args){
+				
+					}},
+					playback: {callback: function(args){
+						switch(args[0]){
+							case "play":
+								authcomm("playback:play");
+								break;
+							case "pause":
+								authcomm("playback:pause");
+								break;
+							case "stop":
+								authcomm("playback:stop");
+								break;
+							case "prev":
+								authcomm("playback:prev");
+								break;
+							case "next":
+								authcomm("playback:next");
+								break;
+						}
+					}},
+					volume: {callback: function(args){
+						authcomm("volume", {level: parseInt(args[0])});
+					}}
+				};
+			var serverlog;
+			var authHandlers;
+			var authcomm;
+			
+			function offline(){
+				serverlog("log", "Server offline", 'mopidy');
+				$('#offline').show();
+				$('.layer').foggy();
+			}
+			
+			$(document).ready(function(){
+				// Init //////////////////////////////
+				mopidy = new Mopidy({
+					webSocketUrl: "ws://hjem.eirikeikaas.no:90/mopidy/ws/"
+				});
+				
+				socket = io.connect('http://hjem.eirikeikaas.no:9090', {query: "authkey="+$.cookie('authKey')+"&authid="+$.cookie('authId')});
+				authed = socket.of('/system');
+				
+				// Helpers ////////////////////////////
+
+				function progress(current, total){
+					current = current/1000;
+					total = total/1000;
+					
+					if(current > total) current = total;
+					
+					$('.progress .bar').width((current/total)*100+'%');
+					
+					$('.time.now').html(timeFromSeconds(current));
+					$('.time.remain').html("-"+timeFromSeconds(total-current));
+					$('.time.total').html(timeFromSeconds(total));
+				}
+				
+				function timeFromSeconds(length){
+					var d = Number(length);
+					var h = Math.floor(d / 3600);
+					var m = Math.floor(d % 3600 / 60);
+					var s = Math.floor(d % 3600 % 60);
+					return ((h > 0 ? h + ":" : "") + (m > 0 ? (h > 0 && m < 10 ? "0" : "") + m + ":" : "0:") + (s < 10 ? "0" : "") + s);
+				}
+				
+				function fill(tracks, votes, last, sel, cb){
+					var html = '';
+					$('#list tbody').html('');
+					for(var i=0;i<tracks.length;i++){
+						urix = tracks[i].uri.split(":");
+						if(typeof last === 'function'){
+							_last = last(votes[tracks[i].uri]);
+						}else{
+							_last = last;
+						}
+						$('#list tbody').append('<tr id="spotify_'+urix[2]+'"><td class="song"><span>'+tracks[i].name+'</span></td><td class="artist"><span>'+tracks[i].artists[0].name+'</span></td><td class="album"><span>'+tracks[i].album.name+'</span></td>'+_last+'</tr>');
+						$('#spotify_'+urix[2]).data('track', tracks[i]);
+					}
+					
+					if(sel == undefined){
+						sel = 'td.song span';
+					}
+					if(cb == undefined){
+						$(sel).click(defaultFill);
+					}else{
+						$(sel).click(cb);
+					}
+				}
+				
+				function position(current){
+					clearInterval(posval);
+					
+					posval = setInterval(function(){
+						pospos += 200;
+						progress(pospos,trk.length);
+					}, 200);
+				}
+				
+				function brightness(r, g, b) {
+					if(r.substring && (r.length == 6 || r.length == 7)){
+						if(r.length==7){
+							r=r.substring(1);
+						}
+						var r =	parseInt(r.substring(0,2),16);
+						var g =	parseInt(r.substring(2,4),16);
+						var b =	parseInt(r.substring(4,6),16);
+					}
+					return Math.sqrt(r * r * .241 + g * g * .691 + b * b * .068);
+				}
+				
+				function size(){
+		    		if($(window).width()<=480){
+			    		$('#search input[type="text"]').width($('#search').width()-80);
+		    		}else{
+		    			$('#tabcontainer').width($('#tabcontainer > .tab').length*($('#tabcontainer > .tab').width()+10));
+		    			$('#volume').width((($('.volume.max').width()+24)*2)+$('.volume.slider').width()+20);
+			    		$('#search input[type="text"]').width($('#search').width()-$('#tabcontainer').width()-$('#volume').width()-70);
+			    	}
+			    	$('.static.layer').offset({top: $(window).height()-$('#search').height()-40, left: 0});
+		    	}
+				
+				function defaultFill(e){
+					var trg = $(e.target).parent().parent();
+					var _uri = trg.attr('id').split('_')[1];
+					
+					socket.emit('queue', {uri: _uri, track: trg.data('track')});
+				}
+				
+				function pad(n){return n<10 ? '0'+n : n}
+				
+				serverlog = function(level, message, aspect){
+					var date = new Date();
+					aspect = (aspect == undefined) ? 'generic' : aspect;
+					$('#console').prepend('<div><span class="time">'+pad(date.getHours())+':'+pad(date.getMinutes())+':'+pad(date.getSeconds())+'</span><span class="aspect">'+aspect+'</span><span class="level '+level+'">'+level.toUpperCase()+'</span>'+message+'</div>');
+				}
+				
+				function commands(command){
+					if(command.substring(0, 1) == ':'){
+						var cmdx = command.split(':');
+						if(syscmd[cmdx[1]] != undefined){
+							syscmd[cmdx[1]].callback(cmdx.slice(2));
+						}
+						return false;
+					}else{
+						return true;
+					}
+				}
+				
+				authcomm = function(_command, _data){
+					authed.emit("command", {command: _command, data: _data});
+				}
+				
+				// Socket handlers ////////////////////
+				
+				
+				// Server handlers ////////////////////
+				function online(){
+					serverlog("ok", "Mopidy online", 'mopidy');
+					playing();
+				}
+				
+				function offline(){
+					serverlog("warning", "Mopidy offline", 'mopidy');
+					$('#offline').show();
+					$('.layer').foggy();
+					$('body').addClass('overflow');
+				}
+				
+				function playing(){
+					$('#offline').hide();
+					$('.layer').foggy(false);
+					$('body').removeClass('overflow');
+				
+					mopidy.playback.getCurrentTrack().then(function(track){
+						if(track){
+							if(trk == undefined || trk.uri != track.uri){
+								trk = track;
+								console.log(trk);
+								artist = encodeURIComponent(track.artists[0].name);
+								album = encodeURIComponent(track.album.name);
+								var artists = '';
+								for(var i=0;i<track.artists.length;i++){
+									artists += track.artists[i].name+", ";
+								}
+								artists = artists.substring(0, artists.length-2);
+								$('#playing .song').html(track.name);
+								$('#playing .artist').html(artists);
+								$('#playing .album').html(track.album.name);
+								
+								$.getJSON('http://hjem.eirikeikaas.no:9090/album/'+artist+'/'+album, function(data, txt, xhr){
+									if(data.success){
+										console.log('Album cover retrieved');
+										$('#albumbg').css('background-image', 'url(\''+data.file+'\')');
+										$('#albumsample').attr('src', data.sample);
+										
+										setTimeout(function(){
+										var img = $('#albumsample')[0];
+										var canvas = $('<canvas/>').css({width:'1px', height: '1px'})[0];
+										canvas.width = img.width;
+										canvas.height = img.height;
+										canvas.getContext('2d').drawImage(img, 0, 0, img.width, img.height);
+										
+										 var pixelData = canvas.getContext('2d').getImageData(0,0, 1, 1).data;
+										 console.log('R: ' + pixelData[0] + '<br>G: ' + pixelData[1] + '<br>B: ' + pixelData[2] + '<br>A: ' + pixelData[3]);
+										 if(brightness(pixelData[0], pixelData[1], pixelData[2]) > 180 && !$('.absolute.layer').hasClass('dark')){
+											 $('.absolute.layer').addClass('dark');
+										 }else{
+											 $('.absolute.layer').removeClass('dark');
+										 }
+										 console.log('brightness: '+brightness(pixelData[0], pixelData[1], pixelData[2]));
+										}, 500);
+									}else{
+										$('#albumbg').css('background-image', '');
+										$('#albumsample').attr('src', '');
+									}
+								}).error(function(err){console.log(err);});
+							}
+						}else{
+							console.log("No current track");
+						}
+					}, console.error.bind(console));
+					mopidy.playback.getTimePosition().then(function(data){
+						console.log("pos", data);
+						pospos = data;
+					}, console.error);
+					mopidy.playback.getState().then(function(state){
+						if(state == "playing"){
+							$('.play').html("p");
+							position(pospos);
+						}else{
+							clearInterval(posval);
+							$('.play').html("P");
+						}
+					});
+					mopidy.playback.getVolume().then(function(volume){
+						$('.volume.slider').val(volume.toString());
+					}, console.error);
+				}
+				
+				// GUI Events /////////////////////////
+				$('.prev').click(function(){
+					authcomm("playback:prev");
+				});
+				
+				$('.play').click(function(){
+					mopidy.playback.getState().then(function(state){
+						if(state == "playing"){
+							authcomm("playback:pause");
+							$('.play').html("P");
+							
+						}else{
+							authcomm("playback:play");
+							$('.play').html("p");
+						}
+					});
+				});
+				
+				$('.stop').click(function(){
+					authcomm("playback:stop");
+					playing();
+				});
+				
+				$('.next').click(function(){
+					authcomm("playback:next");
+				});
+				
+				$('.volume.min').click(function(){
+					authcomm("volume", {level: 0});
+				});
+				
+				$('.volume.slider').change(function(){
+					authcomm("volume", {level: parseInt($('.volume.slider').val())});
+				});
+				
+				$('#search input[type="text"]').focus(function(){
+				console.log("TOP");
+					$.scrollTo($('.static.layer').offset(), 300);
+				});
+				
+				$('#search input[type="text"]').keyup(function(e){
+					if(e.which == 13){
+						if(commands($(this).val()) && $(this).val().length > 0){
+							mopidy.library.search({any: $(this).val()}).then(function(result){
+								$('#list').addClass('result');
+								
+								fill(result[1].tracks, '<td><span class="icon add">a</span></td>');
+							});
+						}
+					}
+				});
+				
+				// Window Events //////////////////////
+				$(window).resize(function(){
+					size();
+				});
+				$(window).focus(playing);
+				
+				size();
+				
+				// Server listeners ///////////////////
+				mopidy.on(console.log.bind(console));
+				mopidy.on('state:online', online);
+				mopidy.on('state:offline', offline);
+				mopidy.on('event:playbackStateChanged', playing);
+				mopidy.on('event:trackPlaybackEnded', playing);
+				mopidy.on('event:trackPlaybackResumed', playing);
+				mopidy.on('event:volumeChanged', playing);
+				mopidy.on('event:tracklistChanged', playing);
+				
+				mopidy.on('event:trackPlaybackResumed', function(){
+					serverlog("log", "Playback resumed", 'mopidy');
+				});
+				
+				// Socket listeners ///////////////////
+				socket.on('list', function (data) {
+					serverlog('ok', 'Queue updated', 'mopidy');
+					fill(data.tracks, data.votes, function(_votes){
+						console.log(_votes);
+						if($.inArray(socket.id, _votes.voters) > -1){
+							return '<td class="meta voted"><span class="vote">V</span>'+_votes.votes+'</td>';
+						}else{
+							return '<td class="meta"><span class="vote">V</span>'+_votes.votes+'</td>';
+						}
+					}, '.vote', function(e){
+						var trg = $(e.target).parent().parent();
+						var _uri = trg.attr('id').split('_')[1];
+						
+						socket.emit('vote', {uri: _uri, track: trg.data('track')});
+					});
+				});
+				socket.on('cover', function (data){
+					serverlog("log", "Recieving cover art status");
+					console.log(data);
+					if(data.success){
+						console.log('Album cover retrieved');
+						$('#albumbg').css('background-image', 'url(\''+data.file+'\')');
+						$('#albumsample').attr('src', data.sample);
+						
+						setTimeout(function(){
+						var img = $('#albumsample')[0];
+						var canvas = $('<canvas/>').css({width:'1px', height: '1px'})[0];
+						canvas.width = img.width;
+						canvas.height = img.height;
+						canvas.getContext('2d').drawImage(img, 0, 0, img.width, img.height);
+						
+						 var pixelData = canvas.getContext('2d').getImageData(0,0, 1, 1).data;
+						 console.log('R: ' + pixelData[0] + '<br>G: ' + pixelData[1] + '<br>B: ' + pixelData[2] + '<br>A: ' + pixelData[3]);
+						 if(brightness(pixelData[0], pixelData[1], pixelData[2]) > 180 && !$('.absolute.layer').hasClass('dark')){
+							 $('.absolute.layer').addClass('dark');
+						 }else{
+							 $('.absolute.layer').removeClass('dark');
+						 }
+						 console.log('brightness: '+brightness(pixelData[0], pixelData[1], pixelData[2]));
+						}, 500);
+					}else{
+						$('#albumbg').css('background-image', '');
+						$('#albumsample').attr('src', '');
+					}
+				});
+				socket.on('log', function (data) {
+					serverlog(data.level, data.message, data.aspect);
+				});
+				socket.on('connect', function() {
+					serverlog('ok', 'Socket.IO online', 'socketio');
+				});
+				socket.on('disconnect', function() {
+					serverlog('warning', 'Socket.IO offline', 'socketio');
+				});
+				socket.on('connect_failed', function() {
+					serverlog('error', 'Socket.IO could not connect', 'socketio');
+				});
+				socket.on('connect_failed', function() {
+					serverlog('error', 'Socket.IO could not connect', 'socketio');
+				});
+				socket.on('reconnect', function() {
+					serverlog('ok', 'Socket.IO reconnected', 'socketio');
+				});
+				socket.on('error', function(reason) {
+					serverlog('error', ''+reason, 'socketio');
+				});
+				
+				// Auth socket listeners /////////////////////////////
+				authed.on('ident', function (data) {
+					serverlog('ok', 'Authenticated', 'systemio');
+					$('body').addClass('auth');
+					size();
+				});
+				authed.on('error', function(reason) {
+					serverlog('error', ''+reason, 'systemio');
+				});
+				authed.on('log', function (data) {
+					serverlog(data.level, data.message, data.aspect);
+				});
+			});
+		</script>
+		<style>
+			body, html{
+				width: 100%;
+				height: 100%;
+				margin: 0;
+				padding: 0;
+			}
+			.absolute.layer{
+				position: fixed;
+				width: 100%;
+				height: 100%;
+				z-index: 1;
+			}
+			.static.layer{
+				position: absolute;
+				background: #222;
+				z-index: 2;
+				width: 100%;
+				min-height: 100%;
+				top: 90%;
+			}
+			body{
+				font-family: "omnes-pro", "Helvetica Neue", Helvetica, sans-serif;
+			}
+			#albumbg{
+				width: 100%;
+				height: 100%;
+				background: #49BA7D fixed center center;
+				background-size: cover;
+
+				position: absolute;
+				z-index: 1;
+			}
+			#albumsample{
+				width: 1px;
+				height: 1px;
+			}
+			#playing{
+				font-weight: 100;
+				margin: 200px 40px 40px 40px;
+				text-align: center;
+				color: #FFF;
+			}
+			.dark #playing{
+				color: #000;
+			}
+			#playing > div{
+				width: 100%;
+				overflow: hidden;
+			}
+			#playing .song{
+				font-size: 100px;
+				line-height: 1.3em;
+				height: 130px;
+			}
+			#playing .album{
+				font-size: 36px;
+				line-height: 1em;
+				height: 46px;
+			}
+			#playing .artist{
+				font-size: 20px;
+				line-height: 1.5em;
+				font-weight: 300;
+				height: 30px;
+			}
+			#search{
+				padding: 20px;
+				height: 50px;
+				background: #1E1E1E;
+			}
+			#search input[type="text"]{
+				width: 70%;
+				padding: 15px;
+				border: none;
+				display: block;
+				background: #292929;
+				border-radius: 5px;
+				font-family: "omnes-pro", "Helvetica Neue", Helvetica, sans-serif;
+				font-size: 14px;
+				color: #FFF;
+				letter-spacing: 1px;
+				float: left;
+				margin-left: 20px;
+				margin-right: -40px;
+			}
+			#search input:focus{
+				outline: none;
+			}
+			#tools {
+    			color: #FFF;
+    			margin: 20px auto;
+    			width: 200px;
+    			display: none;
+			}
+			.auth #tools{
+				display: block;
+			}
+			.dark #tools{
+				color: #000;
+			}
+			#tools > div{
+				width: 20px;
+				height: 18px;
+				text-align: center;
+				padding: 10px 15px;
+				float: left;
+				font-size: 20px;
+			}
+			#tools > div:hover{
+				background: rgba(255,255,255,0.2);
+				cursor: pointer;
+			}
+			.dark #tools > div:hover{
+				background: rgba(0,0,0,0.2);
+			}
+			#status{
+				width: 670px;
+				margin: 40px auto 0 auto;
+				color: #FFF;
+				font-size: 13px;
+				height: 20px;
+			}
+			.dark #status{
+				color: #000;
+			}
+			#status > div{
+				float: left;
+			}
+			#status .progress{
+				background: rgba(255,255,255,0.2);
+				border-radius: 10px;
+				width: 560px;
+				height: 15px;
+				margin: 2px 10px 0 10px;
+				padding: 0;
+			}
+			.dark #status .progress{
+				background: rgba(0,0,0,0.2);
+			}
+			#status .progress .bar{
+				background: #FFF;
+				border-radius: 10px;
+				height: 15px;
+				margin: 0;
+				padding: 0;
+			}
+			.dark #status .progress .bar{
+				background: #000;
+			}
+			.prev{
+				-moz-transform: scale(-1, 1);
+				-webkit-transform: scale(-1, 1);
+				-o-transform: scale(-1, 1);
+				transform: scale(-1, 1);
+			}
+			.next .prev{
+				font-size: 28px;
+			}
+			#list .meta .vote, .volume, #tools, .icon{
+				font-family: 'Pictos Custom';
+				-webkit-font-smoothing: antialiased;
+			}
+			#volume{
+				height: 50px;
+				width: 250px;
+				float: right;
+				display: none;
+			}
+			.auth #volume{
+				display: inline-block;
+			}
+			.volume{
+				color: #555;
+				font-size: 36px;
+				padding: 12px 12px 0 12px;
+				float: left;
+			}
+			.volume.slider{
+				padding: 12px 0;
+			}
+			.volume.max, .volume.min{
+				width: 22px;
+				text-align: center;
+			}
+			#search input[type="range"]{
+				float: left;
+				margin: 9px 10px 0 10px;
+			}
+			#list{
+				width: 100%;
+				border: none;
+			}
+			.time{
+				width: 35px;
+			}
+			#list > thead > tr > td{
+				background: #272727;
+				color: #777;
+				padding: 5px;
+				font-size: 12px;
+				border: none;
+			}
+			#list > tbody > tr > td{
+				background: #242424;
+				color: #BBB;
+				padding: 7px 5px;
+				font-size: 14px;
+				word-spacing: 0.2em;
+				border: none;
+			}
+			#list > tbody > tr:nth-child(odd) > td{
+				background: #212121;
+			}
+			#list tbody tr:hover{
+				background: #191919 !important;
+			}
+			#list tbody tr:hover td{
+				background: none !important;
+				color: #49BA7D;
+			}
+			#list tbody tr td span:hover{
+				text-decoration: underline;
+				cursor: pointer;
+			}
+			#list .meta .vote{
+				font-size: 18px;
+				margin: 0 5px 0 0;
+			}
+			.voted{
+				color: #4CC4E0 !important;
+				text-shadow: 0px 0px 5px rgba(77,198,225,0.25);
+			}
+			#offline{
+				display: none;
+				position: absolute;
+				z-index: 10;
+				width: 100%;
+				height: 100%;
+				background: rgba(0,0,0,0.7);
+			}
+			#offline > div{
+				margin: 300px auto 0 auto;
+				width: 140px;
+				text-transform: uppercase;
+				font-weight: 500;
+				text-align: center;
+				line-height: 1.5em;
+				background: #FF553E;
+				color: #FFF;
+				padding: 70px 50px 60px 50px;
+				border-radius: 300px;
+				height: 100px;
+			}
+			#offline .icon.connection{
+				font-size: 150px;
+				display: block;
+				line-height: 0.4em;
+			}
+			.tab{
+				font-size: 36px;
+				color: #555;
+				float: left;
+				padding: 13px 10px 0 0;
+				width: 36px;
+			}
+			.tab:hover{
+				color: #AAA;
+				cursor: pointer;
+			}
+			#tabcontainer{
+				height: 50px;
+				float: left;
+			}
+			.active{
+				color: #49BA7D;
+			}
+			.active:hover{
+				color: #49BA7D;
+				cursor: default;
+			}
+			.add{
+				background: #242424;
+				padding: 3px 4px 1px 4px;
+				border-radius: 10px;
+				visibility: hidden;
+			}
+			tr:hover .add{
+				visibility: visible;
+			}
+			.add:hover{
+				background: #49BA7D;
+				color: #FFF;
+				cursor: pointer;
+				text-decoration: none !important;
+			}
+			#console{
+				position: absolute;
+				background: rgba(0,0,0,0.85);
+				width: 100%;
+				height: 100%;
+				max-height: 100%;
+				margin-top: -23px;
+				z-index: 1;
+				font-family: 'Panic Sans', Monaco, monospace;
+				color: #FFF;
+				overflow: scroll;
+				display: none;
+			}
+			#console div{
+				margin: 10px 10px 0 10px;
+			}
+			#console div span{
+				display: inline-block;
+				width: 80px;
+			}
+			#console div span.level{
+				width: 105px;
+				text-align: center;
+			}
+			#console div span.aspect{
+				width: 85px;
+				padding-left: 20px;
+				text-align: center;
+			}
+			#console .ok{
+				color: #25E867;
+			}
+			#console .warning{
+				color: #FFBB42;
+			}
+			#console .error{
+				color: #E82E19;
+			}
+			#console .log{
+				color: #32B0FF;
+			}
+			@media(max-width: 1024px){
+				#playing .song{
+					font-size: 80px;
+				}
+				#playing .album{
+					font-size: 30px;
+				}
+				#playing .artist{
+					font-size: 18px;
+				}
+				#offline > div{
+					margin-top: 220px;
+				}
+			}
+			@media(max-width: 700px){
+				#status .progress{
+					width: 70%;
+				}
+				#status{
+					width: 80%;
+				}
+			}
+			@media(max-width: 480px){
+				#albumbg{
+					background-size: auto 560px;
+					background-position: center top;
+				}
+				#playing .song{
+					font-size: 30px;
+					font-weight: 500;
+					line-height: 1.5em;
+					height: 45px;
+				}
+				#playing .album{
+					font-size: 20px;
+					font-weight: 500;
+					height: 25px;
+				}
+				#playing .artist{
+					font-size: 14px;
+					font-weight: 500;
+					height: 21px;
+				}
+				#playing{
+					margin-top: 75px;
+				}
+				#status .progress{
+					width:65%;
+				}
+				.static.layer{
+					top: 99%;
+				}
+				#tabcontainer, #volume{
+					clear: both;
+				}
+				#search input[type="text"]{
+					float: none;
+				}
+				#search{
+					height: 180px;
+				}
+				
+			}
+		</style>
+	</head>
+	<body>
+		<div id="offline">
+			<div>
+				<span class="icon connection">C</span>
+				Serveren er utilgjengelig
+			</div>
+		</div>
+		<div id="albumbg">
+		</div>
+		<img src="" id="albumsample">
+		<div class="absolute layer">
+			<div id="console"></div>
+			<div id="playing">
+				<div class="song"></div>
+				<div class="album"></div>
+				<div class="artist"></div>
+			</div>
+			<div id="status">
+				<div class="time remain">-00:00</div>
+				<div class="progress">
+					<div class="bar"></div>
+				</div>
+				<div class="time total">00:00</div>
+			</div>
+			<div id="tools">
+				<div class="prev">F</div>
+				<div class="play">P</div>
+				<div class="stop">S</div>
+				<div class="next">F</div>
+			</div>
+		</div>
+		<div class="static layer">
+			<div id="search">
+				<div id="volume">
+					<div class="volume min">-</div>
+					<input class="volume slider" type="range">
+					<div class="volume max">+</div>
+				</div>
+				<div id="tabcontainer">
+					<div class="tab queue icon active">Q</div>
+					<div class="tab playlist icon">L</div>
+					<div class="tab album icon">c</div>
+					<div class="tab artist icon">A</div>
+				</div>
+				<input type="text" placeholder="Søk i Spotify">
+			</div>
+			<table id="list" border="0" cellspacing="0">
+				<thead>
+					<tr>
+						<td>Sang</td>
+						<td>Artist</td>
+						<td>Album</td>
+						<td>&nbsp;</td>
+					</tr>
+				</thead>
+				<tbody>
+				</tbody>
+			</table>
+		</div>
+	</body>
+</html>
