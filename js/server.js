@@ -79,7 +79,7 @@ var defaults = [
 var settings = nosql.all(function(doc){ return doc.type == 'setting'; });
 defaults.forEach(function(o){
 	if(settings[o.key] == undefined){
-		nosql.insert({type: 'setting', key: o.key, value: o.key});
+		nosql.insert({type: 'setting', key: o.key, value: o.value});
 	}
 });
 settings = null;
@@ -124,7 +124,9 @@ var serverlog = function(_level, _message, _aspect){
 	io.of('/system').emit('log', {level: _level, message: _message, aspect: _aspect});
 }
 var updateQueue = function(_track, _votes, _voter){
-	//if(nosql.one('doc.key == "'+_track.uri+'"');
+	nosql.all(function(doc){
+		console.log("Console "+doc);
+	});
 	if(_queue[_track.uri] == undefined){ // TODO: NoSQL
 		serverlog('ok', 'Added '+_track.name, 'mopidy');
 		_queue[_track.uri] = {track: _track, votes: _votes, voters: [_voter]}; // TODO: NoSQL
