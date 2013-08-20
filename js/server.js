@@ -124,8 +124,13 @@ var serverlog = function(_level, _message, _aspect){
 	io.of('/system').emit('log', {level: _level, message: _message, aspect: _aspect});
 }
 var updateQueue = function(_track, _votes, _voter){
-	nosql.all(function(doc){
-		console.log("Console "+doc);
+	var exists = false;
+	nosql.one(function(doc){ if(doc.type == 'track' && doc.key == _track.uri){ return doc; } }, function(doc){
+		if(!doc){
+			console.log("NO EXISTO!");
+		}else{
+			console.dir(doc);
+		}
 	});
 	if(_queue[_track.uri] == undefined){ // TODO: NoSQL
 		serverlog('ok', 'Added '+_track.name, 'mopidy');
@@ -178,14 +183,14 @@ var returnTracklist = function(){
 	var sortlist = [];
 	var votelist = {};
 	
-	nosql.view.all('queue', function(tracks){
+	console.log("VIEWALLRES", nosql.view.all('queue', function(tracks){
 		tracks.forEach(function(o){
 			votelist[o.key] = {votes: o.votes, voters: o.voters};
 		});
 		console.log("TRQ", tracks);
 		
 		return [tracks, votelist];
-	});
+	}));
 	
 	for(key in _queue){  // TODO: NoSQL
 		sortlist.push(_queue[key]); // TODO: NoSQL
